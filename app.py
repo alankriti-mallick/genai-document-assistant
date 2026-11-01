@@ -1,5 +1,6 @@
 import streamlit as st
 from pypdf import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 st.set_page_config(
     page_title="GenAI Document Assistant",
@@ -37,6 +38,21 @@ if uploaded_file is not None:
             extracted_text,
             height=300
         )
+        
+        # Split the extracted text into smaller chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=100
+        )
+
+        chunks = text_splitter.split_text(extracted_text)
+
+        st.subheader("Text chunks")
+        st.write(f"Created {len(chunks)} chunks")
+
+        for index, chunk in enumerate(chunks):
+            with st.expander(f"Chunk {index + 1}"):
+                st.write(chunk)
     else:
         st.warning(
             "No selectable text was found. "
