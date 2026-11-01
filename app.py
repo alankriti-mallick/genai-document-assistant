@@ -1,42 +1,44 @@
 import streamlit as st
+from pypdf import PdfReader
 
-# Page configuration
 st.set_page_config(
     page_title="GenAI Document Assistant",
     page_icon="🤖",
     layout="wide"
 )
 
-# Application title
 st.title("🤖 GenAI Document Assistant")
-
-st.write(
-    "Upload your documents and ask questions "
-    "to understand their content."
-)
-
-# Document upload
-st.subheader("Upload your document")
+st.write("Upload a PDF and extract its text.")
 
 uploaded_file = st.file_uploader(
     "Choose a PDF file",
     type=["pdf"]
 )
 
-# Display uploaded file information
 if uploaded_file is not None:
+    st.success(f"Uploaded: {uploaded_file.name}")
 
-    st.success("Document uploaded successfully!")
+    # Read the PDF from the uploaded file
+    pdf_reader = PdfReader(uploaded_file)
 
-    st.write("**File name:**", uploaded_file.name)
+    # Extract text from each page
+    extracted_text = ""
 
-    st.write(
-        "**File size:**",
-        round(uploaded_file.size / 1024, 2),
-        "KB"
-    )
+    for page in pdf_reader.pages:
+        page_text = page.extract_text()
 
-    st.write("We will process this document in the next step.")
+        if page_text:
+            extracted_text += page_text + "\n"
 
-else:
-    st.info("Please upload a PDF document to get started.")
+    if extracted_text.strip():
+        st.subheader("Extracted text")
+        st.text_area(
+            "Text from your PDF",
+            extracted_text,
+            height=300
+        )
+    else:
+        st.warning(
+            "No selectable text was found. "
+            "This may be a scanned PDF that needs OCR."
+        )
