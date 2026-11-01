@@ -1,174 +1,53 @@
-
 import streamlit as st
-from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import chromadb
 import ollama
 
-# --------------------------------------------------
-# 1. Streamlit Configuration
-# --------------------------------------------------
+from src.pdf_processor import process_pdf
+from src.embeddings import get_embedding_model, generate_embeddings
+from src.vector_store import get_collection, store_chunks, search_chunks
 
-st.set_page_config(
-    page_title="GenAI Document Assistant",
-    page_icon="🤖",
-    layout="wide"
-)
 
-st.title("🤖 GenAI Document Assistant")
-st.write("Upload a PDF and ask questions about its content.")
+st.set_page_config(page_title="GenAI Document Assistant")
 
-# Initialize conversation history
+st.title("GenAI Document Assistant")
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+model = get_embedding_model()
+collection = get_collection()
 
-# --------------------------------------------------
-# 2. Load Embedding Model
-# --------------------------------------------------
+uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
 
-@st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+if uploaded_file:
+    if st.button("Process PDF"):
 
+        chunks, metadatas = process_pdf(uploaded_file)
 
-# --------------------------------------------------
-# 3. Initialize ChromaDB
-# --------------------------------------------------
+        embeddings = generate_embeddings(model, chunks)
 
-@st.cache_resource
-def get_chroma_collection():
-
-    client = chromadb.PersistentClient(path="./chroma_db")
-
-    return client.get_or_create_collection(
-        name="document_chunks"
-    )
-
-
-model = load_embedding_model()
-collection = get_chroma_collection()
-
-
-# --------------------------------------------------
-# 4. PDF Upload
-# --------------------------------------------------
-
-uploaded_file = st.file_uploader(
-    "Choose a PDF file",
-    type=["pdf"]
-)
-
-
-if uploaded_file is not None:
-
-    st.success(f"Uploaded: {uploaded_file.name}")
-
-    # Extract text page by page
-    pdf_reader = PdfReader(uploaded_file)
-
-    pages = []
-
-    for page_number, page in enumerate(pdf_reader.pages, start=1):
-
-        page_text = page.extract_text()
-
-        if page_text and page_text.strip():
-
-            pages.append({
-                "page_number": page_number,
-                "text": page_text
-            })
-
-    if pages:
-
-        # --------------------------------------------------
-        # 5. Text Chunking with Page Metadata
-        # --------------------------------------------------
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=100
+        # Remove previous chunks from this document
+        existing = collection.get(
+            where={"document_name": uploaded_file.name}
         )
 
-        chunks = []
-        metadatas = []
+        if existing["ids"]:
+            collection.delete(ids=existing["ids"])
 
-        for page in pages:
+        store_chunks(collection, chunks, embeddings, metadatas)
 
-            page_chunks = text_splitter.split_text(page["text"])
-
-            for chunk in page_chunks:
-
-                chunks.append(chunk)
-
-                metadatas.append({
-                    "document_name": uploaded_file.name,
-                    "page_number": page["page_number"]
-                })
-
-        st.write(f"Total pages: {len(pages)}")
-        st.write(f"Total chunks: {len(chunks)}")
-
-        # --------------------------------------------------
-        # 6. Generate Embeddings and Store in ChromaDB
-        # --------------------------------------------------
-
-        if st.button("Create embeddings and store"):
-
-            with st.spinner("Processing document..."):
-
-                embeddings = model.encode(chunks)
-
-                document_id = uploaded_file.name.replace(" ", "_")
-
-                ids = [
-                    f"{document_id}_{index}"
-                    for index in range(len(chunks))
-                ]
-
-                # Remove older chunks for the same document
-                existing = collection.get(
-                    where={"document_name": uploaded_file.name}
-                )
-
-                if existing["ids"]:
-                    collection.delete(ids=existing["ids"])
-
-                collection.add(
-                    ids=ids,
-                    documents=chunks,
-                    embeddings=embeddings.tolist(),
-                    metadatas=metadatas
-                )
-
-            st.success("Document processed successfully!")
-
-    else:
-
-        st.warning("No readable text found in this PDF.")
+        st.success("PDF processed successfully!")
 
 
-# --------------------------------------------------
-# 7. Chat Interface
-# --------------------------------------------------
-
-st.subheader("💬 Chat with your document")
-
-# Display previous conversation
+# Display chat history
 for message in st.session_state.messages:
-
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
 
-question = st.chat_input("Ask a question about your document...")
-
+question = st.chat_input("Ask something about your document")
 
 if question:
 
-    # Save and display user question
     st.session_state.messages.append({
         "role": "user",
         "content": question
@@ -178,150 +57,67 @@ if question:
         st.write(question)
 
     if collection.count() == 0:
-
-        st.warning("Please upload and process a document first.")
+        st.warning("Please upload and process a PDF first.")
 
     else:
-
         with st.chat_message("assistant"):
 
-            with st.spinner("Searching document and generating answer..."):
+            with st.spinner("Thinking..."):
 
-                # --------------------------------------------------
-                # 8. Retrieve Relevant Chunks
-                # --------------------------------------------------
+                question_embedding = generate_embeddings(
+                    model, [question]
+                )[0]
 
-                question_embedding = model.encode(question)
-
-                results = collection.query(
-                    query_embeddings=[
-                        question_embedding.tolist()
-                    ],
-                    n_results=min(3, collection.count())
+                results = search_chunks(
+                    collection, question_embedding
                 )
 
                 retrieved_chunks = results["documents"][0]
                 retrieved_metadata = results["metadatas"][0]
-                retrieved_distances = results["distances"][0]
 
-                # Experimental relevance threshold
-                DISTANCE_THRESHOLD = 1.25
+                context = "\n\n".join(retrieved_chunks)
 
-                # Keep only relevant chunks
-                filtered_results = [
-                    (chunk, metadata, distance)
-                    for chunk, metadata, distance in zip(
-                        retrieved_chunks,
-                        retrieved_metadata,
-                        retrieved_distances
-                    )
-                    if distance <= DISTANCE_THRESHOLD
-                ]
+                system_message = {
+                    "role": "system",
+                    "content": f"""
+                    You are a helpful document assistant.
 
-                retrieved_chunks = [item[0] for item in filtered_results]
-                retrieved_metadata = [item[1] for item in filtered_results]
-                retrieved_distances = [item[2] for item in filtered_results]
+                    Answer only using the provided document context.
+                    If the answer is not available, say you cannot find it
+                    in the document.
 
-                if not retrieved_chunks:
+                    Document context:
+                    {context}
+                    """
+                }
 
-                    answer = (
-                        "I couldn't find sufficiently relevant information "
-                        "in the document to answer your question."
-                    )
+                chat_messages = [
+                    system_message
+                ] + st.session_state.messages
 
-                else:
-                    # Keep your existing context creation and Ollama generation here
+                response = ollama.chat(
+                    model="llama3.2:3b",
+                    messages=chat_messages
+                )
 
-                    # Combine retrieved chunks
-                    context = "\n\n".join(retrieved_chunks)
+                answer = response["message"]["content"]
 
-                    # --------------------------------------------------
-                    # 9. Generate Answer Using Ollama
-                    # --------------------------------------------------
+                st.write(answer)
 
-                    system_message = {
-                        "role": "system",
-                        "content": f"""
-                        You are a helpful document assistant.
-
-                        Answer questions using the provided document context
-                        and previous conversation.
-
-                        Use conversation history to understand follow-up questions.
-
-                        Answer using only information supported by the document.
-
-                        If the answer is unavailable in the context,
-                        clearly say that the document does not contain
-                        the required information.
-
-                        Do not invent facts.
-
-                        Document context:
-                        {context}
-                        """
-                    }
-
-                    chat_messages = [
-                        system_message
-                    ] + st.session_state.messages
-
-                    response = ollama.chat(
-                        model="llama3.2:3b",
-                        messages=chat_messages
-                    )
-
-                    answer = response["message"]["content"]
-
-                    # Display answer
-                    st.write(answer)
-
-                    # --------------------------------------------------
-                    # 10. Display Source References
-                    # --------------------------------------------------
-
-                    st.markdown("**📚 Sources**")
-
-                    # Avoid repeating the same page reference
-                    displayed_sources = set()
-
+                # Display sources
+                with st.expander("View sources"):
                     for metadata in retrieved_metadata:
-
-                        source = (
-                            metadata.get("document_name", "Unknown document"),
-                            metadata.get("page_number", "Page information unavailable")
+                        st.write(
+                            f"{metadata.get('document_name', 'Unknown document')} "
+                            f"- Page {metadata.get('page_number', 'Unknown')}"
                         )
 
-                        if source not in displayed_sources:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer
+                })
 
-                            displayed_sources.add(source)
-
-                            st.caption(
-                                f"📄 {source[0]} — Page {source[1]}"
-                            )
-
-                    with st.expander("View retrieved document sections"):
-
-                        for index, chunk in enumerate(retrieved_chunks):
-
-                            st.markdown(f"**Source {index + 1}**")
-                            st.write(chunk)
-
-                            st.divider()
-
-                    # Save AI response
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer
-                    })
-
-
-# --------------------------------------------------
-# 11. Clear Conversation
-# --------------------------------------------------
 
 if st.button("Clear conversation"):
-
     st.session_state.messages = []
-
     st.rerun()
